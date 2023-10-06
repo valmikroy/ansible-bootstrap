@@ -1,0 +1,23 @@
+---
+- name: Ubuntu bootstrap playbook
+  become: true
+  hosts: all
+
+  tasks:
+    - name: install necessary packages
+      apt:
+        name: "{{ item }}"
+      loop:
+        - vim
+        - curl
+        - ansible
+        - ansible-lint
+        - sshpass
+        - git
+        - yamllint
+        - tmux
+    - name: sudo access by group
+      copy:
+        content: '%sudo ALL=(ALL:ALL) ALL'
+        dest: /etc/sudoers.d/sudo_with_passwd
+        mode: 0440
