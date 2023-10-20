@@ -10,7 +10,7 @@ ansible-lint --offline  -p bootstrap.yaml
 
 - Execute
 ```
-ansible-playbook -i <IP address>, -u $(whoami) -kK  bootstrap.yaml
+ansible-playbook -i <IP address>, -u $(whoami) -kK  bootstrap.yaml --extra-vars "user=<username>"
 ```
 
 - To prepare mac osx 

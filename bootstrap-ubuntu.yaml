@@ -16,8 +16,25 @@
         - git
         - yamllint
         - tmux
+        - samba
+        - cups
+        - printer-driver-brlaser  
+        - avahi-daemon  
+        - brother-cups-wrapper-laser
+        - brother-cups-wrapper-laser1
+        - cups-ipp-utils  
+    - name: Adding existing user {{ user }} to group sudo
+      user:
+        name: "{{ user }}"
+        groups: 
+          - sudo
+          - sys  
+          - lpadmin
+        append: yes
     - name: sudo access by group
       copy:
-        content: '%sudo ALL=(ALL:ALL) ALL'
+        content: | 
+          %sudo ALL=(ALL:ALL) ALL
+          {{ user }} ALL=(ALL) NOPASSWD: ALL
         dest: /etc/sudoers.d/sudo_with_passwd
         mode: 0440
