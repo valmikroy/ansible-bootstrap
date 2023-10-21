@@ -10,11 +10,6 @@ ansible-lint --offline  -p bootstrap.yaml
 
 - Execute
 ```
-ansible-playbook -i <IP address>, -u $(whoami) -kK  bootstrap.yaml --extra-vars "user=<username>"
+ansible-playbook    bootstrap-ubuntu.yaml --extra-vars "user=$(whoami)"
 ```
 
-- To prepare mac osx 
-```
-brew tap esolitos/ipa
-brew install sshpass
-```

@@ -1,7 +1,8 @@
 ---
 - name: Ubuntu bootstrap playbook
   become: true
-  hosts: all
+  hosts: localhost
+  connection: local
 
   tasks:
     - name: install necessary packages
