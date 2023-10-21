@@ -8,7 +8,7 @@
       apt:
         name: "{{ item }}"
       loop:
-        - vim
+        - nvim
         - curl
         - ansible
         - ansible-lint
