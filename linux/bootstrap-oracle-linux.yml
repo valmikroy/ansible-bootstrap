@@ -1,0 +1,297 @@
+---
+- name: Linux workstation bootstrap configuration
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars:
+    # Override if needed:
+    # ansible-playbook -i inventory.ini bootstrap-oracle-linux.yml -e bootstrap_user=opc
+    bootstrap_user: >-
+      {{
+        ansible_user
+        | default(ansible_facts['user_id'])
+      }}
+    admin_group: "{{ 'sudo' if ansible_facts['os_family'] == 'Debian' else 'wheel' }}"
+    ca_trust_update_command: "{{ 'update-ca-certificates' if ansible_facts['os_family'] == 'Debian' else 'update-ca-trust' }}"
+    chrony_service_name: "{{ 'chrony' if ansible_facts['os_family'] == 'Debian' else 'chronyd' }}"
+    ssh_service_name: "{{ 'ssh' if ansible_facts['os_family'] == 'Debian' else 'sshd' }}"
+    base_packages:
+      - sudo
+      - vim
+      - curl
+      - wget
+      - git
+      - ca-certificates
+      - chrony
+    os_family_packages: "{{ ['python3-apt'] if ansible_facts['os_family'] == 'Debian' else ['python3-pip'] }}"
+    firewall_packages: "{{ ['ufw'] if ansible_facts['os_family'] == 'Debian' else ['firewalld'] }}"
+    golang_package: "{{ 'golang-go' if ansible_facts['os_family'] == 'Debian' else 'golang' }}"
+    podman_packages: "{{ ['podman', 'podman-compose'] if ansible_facts['os_family'] == 'Debian' else ['podman'] }}"
+
+  tasks:
+    - name: Ensure host OS family is supported
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['os_family'] in ['Debian', 'RedHat']
+        fail_msg: This playbook supports Oracle Linux/Red Hat family and Ubuntu/Debian family hosts.
+
+    - name: Update apt package cache
+      ansible.builtin.apt:
+        update_cache: true
+        cache_valid_time: 3600
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Ensure required system packages are installed
+      ansible.builtin.package:
+        name: "{{ base_packages + os_family_packages + firewall_packages }}"
+        state: latest
+
+    - name: Update CA trust store
+      ansible.builtin.command:
+        cmd: "{{ ca_trust_update_command }}"
+      changed_when: false
+
+    - name: Check SELinux mode
+      ansible.builtin.command:
+        cmd: getenforce
+      register: selinux_mode
+      changed_when: false
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Set SELinux to permissive for current boot
+      ansible.builtin.command:
+        cmd: setenforce 0
+      when:
+        - ansible_facts['os_family'] == 'RedHat'
+        - selinux_mode.stdout == 'Enforcing'
+
+    - name: Persist SELinux permissive mode
+      ansible.builtin.lineinfile:
+        path: /etc/selinux/config
+        regexp: '^SELINUX='
+        line: SELINUX=permissive
+        backup: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Allow unprivileged services to bind HTTP and HTTPS ports
+      ansible.posix.sysctl:
+        name: net.ipv4.ip_unprivileged_port_start
+        value: '80'
+        sysctl_file: /etc/sysctl.conf
+        state: present
+        reload: true
+
+    - name: Ensure chrony is enabled and running
+      ansible.builtin.service:
+        name: "{{ chrony_service_name }}"
+        enabled: true
+        state: started
+
+    - name: Ensure firewalld is enabled and running
+      ansible.builtin.service:
+        name: firewalld
+        enabled: true
+        state: started
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Allow SSH through firewalld
+      ansible.posix.firewalld:
+        service: ssh
+        permanent: true
+        state: enabled
+        immediate: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Allow SSH through ufw
+      ansible.builtin.command:
+        cmd: ufw allow ssh
+      register: ufw_allow_ssh
+      changed_when: "'Rules updated' in ufw_allow_ssh.stdout or 'Rule added' in ufw_allow_ssh.stdout"
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Check ufw status
+      ansible.builtin.command:
+        cmd: ufw status
+      register: ufw_status
+      changed_when: false
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Ensure ufw is enabled
+      ansible.builtin.command:
+        cmd: ufw --force enable
+      changed_when: "'Firewall is active and enabled' in ufw_enable.stdout"
+      register: ufw_enable
+      when:
+        - ansible_facts['os_family'] == 'Debian'
+        - "'Status: inactive' in ufw_status.stdout"
+
+    - name: Ensure admin group exists
+      ansible.builtin.group:
+        name: "{{ admin_group }}"
+        state: present
+
+    - name: Ensure bootstrap user exists
+      ansible.builtin.user:
+        name: "{{ bootstrap_user }}"
+        shell: /bin/bash
+        create_home: true
+        groups: "{{ admin_group }}"
+        append: true
+        state: present
+
+    - name: Gather passwd database entries
+      ansible.builtin.getent:
+        database: passwd
+
+    - name: Set bootstrap user facts
+      ansible.builtin.set_fact:
+        bootstrap_home: "{{ ansible_facts['getent_passwd'][bootstrap_user][4] }}"
+        bootstrap_uid: "{{ ansible_facts['getent_passwd'][bootstrap_user][1] }}"
+
+    - name: Ensure .ssh directory exists
+      ansible.builtin.file:
+        path: "{{ bootstrap_home }}/.ssh"
+        state: directory
+        owner: "{{ bootstrap_user }}"
+        group: "{{ bootstrap_user }}"
+        mode: '0700'
+
+    - name: Install authorized SSH key for bootstrap user
+      ansible.posix.authorized_key:
+        user: "{{ bootstrap_user }}"
+        state: present
+        key: "{{ lookup('file', 'files/ssh/id_ed25519.pub') }}"
+
+    - name: Configure passwordless sudo for admin group
+      ansible.builtin.copy:
+        dest: "/etc/sudoers.d/{{ admin_group }}-nopasswd"
+        content: |
+          %{{ admin_group }} ALL=(ALL) NOPASSWD: ALL
+        owner: root
+        group: root
+        mode: '0440'
+        validate: '/usr/sbin/visudo -cf %s'
+
+    - name: Disable root SSH login
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: 'PermitRootLogin no'
+        backup: true
+      notify: Restart ssh service
+
+    - name: Disable password authentication
+      ansible.builtin.lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: 'PasswordAuthentication no'
+        backup: true
+      notify: Restart ssh service
+
+    - name: Upgrade all packages on Oracle Linux and Red Hat family hosts
+      ansible.builtin.dnf:
+        name: '*'
+        state: latest
+        update_only: true
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Upgrade all packages on Ubuntu and Debian family hosts
+      ansible.builtin.apt:
+        upgrade: dist
+        update_cache: true
+      when: ansible_facts['os_family'] == 'Debian'
+
+    - name: Install Go
+      ansible.builtin.package:
+        name: "{{ golang_package }}"
+        state: latest
+
+    - name: Install Podman
+      ansible.builtin.package:
+        name: "{{ podman_packages }}"
+        state: latest
+
+    - name: Install podman-compose with pip on Oracle Linux and Red Hat family hosts
+      ansible.builtin.pip:
+        name: podman-compose
+        executable: pip3
+        state: present
+      when: ansible_facts['os_family'] == 'RedHat'
+
+    - name: Check bootstrap user linger status
+      ansible.builtin.stat:
+        path: "/var/lib/systemd/linger/{{ bootstrap_user }}"
+      register: bootstrap_user_linger
+
+    - name: Enable linger for bootstrap user
+      ansible.builtin.command:
+        cmd: "loginctl enable-linger {{ bootstrap_user }}"
+      when: not bootstrap_user_linger.stat.exists
+
+    - name: Ensure bootstrap user systemd manager is running
+      ansible.builtin.systemd:
+        name: "user@{{ bootstrap_uid }}.service"
+        state: started
+
+    - name: Enable and start Podman user socket
+      ansible.builtin.systemd:
+        name: podman.socket
+        scope: user
+        enabled: true
+        state: started
+      become: true
+      become_user: "{{ bootstrap_user }}"
+      environment:
+        XDG_RUNTIME_DIR: "/run/user/{{ bootstrap_uid }}"
+
+    - name: Install Podman shell aliases
+      ansible.builtin.copy:
+        dest: /etc/profile.d/podman.sh
+        content: |
+          if command -v podman >/dev/null 2>&1; then
+            alias docker=podman
+          fi
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install tmux
+      ansible.builtin.package:
+        name: tmux
+        state: latest
+
+    - name: Install global tmux configuration
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/tmux/tmux.conf"
+        dest: /etc/tmux.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: Install tmux shell shortcuts globally
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/files/tmux/tmux.sh"
+        dest: /etc/profile.d/tmux.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: Set global terminal color support
+      ansible.builtin.copy:
+        dest: /etc/profile.d/term.sh
+        content: |
+          export TERM=xterm-256color
+
+          if [ -n "$PS1" ]; then
+            export PS1='\[\e[1;36m\][workstation-vm]\[\e[0m\] \[\e[1;32m\]\u\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]\$ '
+          fi
+        owner: root
+        group: root
+        mode: '0644'
+
+  handlers:
+    - name: Restart ssh service
+      ansible.builtin.service:
+        name: "{{ ssh_service_name }}"
+        state: restarted
